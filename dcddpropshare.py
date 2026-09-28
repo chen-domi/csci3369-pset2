@@ -14,97 +14,229 @@ from util import even_split
 from peer import Peer
 
 class DcddPropShare(Peer):
+
     def post_init(self):
-        print(("post_init(): %s here!" % self.id))
-        self.dummy_state = dict()
-        self.dummy_state["cake"] = "lie"
-    
+        pass
+
     def requests(self, peers, history):
-        """
-        peers: available info about the peers (who has what pieces)
-        history: what's happened so far as far as this peer can see
+        # Find all pieces I still need
+        needed_pieces = []
 
-        returns: a list of Request() objects
+        for i in range(len(self.pieces)):
+            if self.pieces[i] < self.conf.blocks_per_piece:
+                needed_pieces.append(i)
 
-        This will be called after update_pieces() with the most recent state.
-        """
-        needed = lambda i: self.pieces[i] < self.conf.blocks_per_piece
-        needed_pieces = list(filter(needed, list(range(len(self.pieces)))))
-        np_set = set(needed_pieces)  # sets support fast intersection ops.
+        # Count rarity of each needed piece
+        rarity = {}
 
+        for piece_id in needed_pieces:
+            count = 0
 
-        logging.debug("%s here: still need pieces %s" % (
-            self.id, needed_pieces))
+            for peer in peers:
+                if piece_id in peer.available_pieces:
+                    count += 1
 
-        logging.debug("%s still here. Here are some peers:" % self.id)
-        for p in peers:
-            logging.debug("id: %s, available pieces: %s" % (p.id, p.available_pieces))
+            rarity[piece_id] = count
 
-        logging.debug("And look, I have my entire history available too:")
-        logging.debug("look at the AgentHistory class in history.py for details")
-        logging.debug(str(history))
+        requests = []
 
-        requests = []   # We'll put all the things we want here
-        # Symmetry breaking is good...
-        random.shuffle(needed_pieces)
-        
-        # Sort peers by id.  This is probably not a useful sort, but other 
-        # sorts might be useful
-        peers.sort(key=lambda p: p.id)
-        # request all available pieces from all peers!
-        # (up to self.max_requests from each)
+        # Consider each peer independently
         for peer in peers:
-            av_set = set(peer.available_pieces)
-            isect = av_set.intersection(np_set)
-            n = min(self.max_requests, len(isect))
-            # More symmetry breaking -- ask for random pieces.
-            # This would be the place to try fancier piece-requesting strategies
-            # to avoid getting the same thing from multiple peers at a time.
-            for piece_id in random.sample(sorted(isect), n):
-                # aha! The peer has this piece! Request it.
-                # which part of the piece do we need next?
-                # (must get the next-needed blocks in order)
-                start_block = self.pieces[piece_id]
-                r = Request(self.id, peer.id, piece_id, start_block)
-                requests.append(r)
+            candidates = []
+
+            # Pieces I need that this peer has
+            for piece_id in needed_pieces:
+                if piece_id in peer.available_pieces:
+                    candidates.append(piece_id)
+
+            # Randomize ties
+            random.shuffle(candidates)
+
+            # Then sort rarest-first
+            candidates.sort(
+                key=lambda piece_id: rarity[piece_id]
+            )
+
+            num_requests = min(
+                self.max_requests,
+                len(candidates)
+            )
+
+            for i in range(num_requests):
+                piece_id = candidates[i]
+
+                request = Request(
+                    self.id,
+                    peer.id,
+                    piece_id,
+                    self.pieces[piece_id]
+                )
+
+                requests.append(request)
 
         return requests
 
     def uploads(self, requests, peers, history):
-        """
-        requests -- a list of the requests for this peer for this round
-        peers -- available info about all the peers
-        history -- history for all previous rounds
 
-        returns: list of Upload objects.
-
-        In each round, this will be called after requests().
-        """
-
-        round = history.current_round()
-        logging.debug("%s again.  It's round %d." % (
-            self.id, round))
-        # One could look at other stuff in the history too here.
-        # For example, history.downloads[round-1] (if round != 0, of course)
-        # has a list of Download objects for each Download to this peer in
-        # the previous round.
-
+        # If nobody is requesting from us, upload to nobody
         if len(requests) == 0:
-            logging.debug("No one wants my pieces!")
-            chosen = []
-            bws = []
+            return []
+
+        # -----------------------------------------
+        # 1. Find unique peers requesting from us
+        # -----------------------------------------
+
+        requester_ids = []
+
+        for request in requests:
+            if request.requester_id not in requester_ids:
+                requester_ids.append(request.requester_id)
+
+        # -----------------------------------------
+        # 2. Look at downloads from previous round
+        # -----------------------------------------
+
+        contributions = {}
+
+        for peer_id in requester_ids:
+            contributions[peer_id] = 0
+
+        round_num = history.current_round()
+
+        if round_num > 0:
+            previous_downloads = history.downloads[-1]
+            for download in previous_downloads:
+                # Only count peers who are requesting from us now
+                if download.from_id in contributions:
+                    contributions[download.from_id] += download.blocks
+
+        # -----------------------------------------
+        # 3. Find peers who contributed last round
+        # -----------------------------------------
+
+        contributors = []
+
+        for peer_id in requester_ids:
+            if contributions[peer_id] > 0:
+                contributors.append(peer_id)
+
+        # -----------------------------------------
+        # 4. If nobody contributed last round,
+        #    use all bandwidth optimistically
+        # -----------------------------------------
+
+        if len(contributors) == 0:
+            peer_id = random.choice(requester_ids)
+
+            return [
+                Upload(
+                    self.id,
+                    peer_id,
+                    self.up_bw
+                )
+            ]
+
+        # -----------------------------------------
+        # 5. Reserve about 10% for optimistic upload
+        # -----------------------------------------
+
+        optimistic_bw = int(round(self.up_bw * 0.10))
+
+        # Make sure there is at least 1 block
+        # for optimistic unblocking when possible
+        if self.up_bw > 1:
+            optimistic_bw = max(1, optimistic_bw)
+
+        optimistic_bw = min(
+            optimistic_bw,
+            self.up_bw
+        )
+
+        regular_bw = self.up_bw - optimistic_bw
+
+        # -----------------------------------------
+        # 6. Split regular bandwidth proportionally
+        # -----------------------------------------
+
+        total_contribution = 0
+
+        for peer_id in contributors:
+            total_contribution += contributions[peer_id]
+
+        allocations = {}
+
+        for peer_id in contributors:
+
+            share = (
+                contributions[peer_id]
+                / total_contribution
+            )
+
+            # Start by rounding down
+            allocations[peer_id] = int(
+                share * regular_bw
+            )
+
+        # -----------------------------------------
+        # 7. Give leftover blocks caused by rounding
+        # -----------------------------------------
+
+        used_regular_bw = 0
+
+        for peer_id in contributors:
+            used_regular_bw += allocations[peer_id]
+
+        leftover = regular_bw - used_regular_bw
+
+        # Randomize who gets rounding leftovers
+        random.shuffle(contributors)
+
+        for i in range(leftover):
+            peer_id = contributors[i % len(contributors)]
+            allocations[peer_id] += 1
+
+        # -----------------------------------------
+        # 8. Choose optimistic peer
+        # -----------------------------------------
+
+        optimistic_candidates = []
+
+        # Prefer someone who did NOT contribute last round
+        for peer_id in requester_ids:
+            if peer_id not in contributors:
+                optimistic_candidates.append(peer_id)
+
+        if len(optimistic_candidates) > 0:
+            optimistic_peer = random.choice(
+                optimistic_candidates
+            )
         else:
-            logging.debug("Still here: uploading to a random peer")
-            # change my internal state for no reason
-            self.dummy_state["cake"] = "pie"
+            # Everyone contributed, so pick any requester
+            optimistic_peer = random.choice(
+                requester_ids
+            )
 
-            request = random.choice(requests)
-            chosen = [request.requester_id]
-            # Evenly "split" my upload bandwidth among the one chosen requester
-            bws = even_split(self.up_bw, len(chosen))
+        # Add optimistic bandwidth
+        if optimistic_peer in allocations:
+            allocations[optimistic_peer] += optimistic_bw
+        else:
+            allocations[optimistic_peer] = optimistic_bw
 
-        # create actual uploads out of the list of peer ids and bandwidths
-        uploads = [Upload(self.id, peer_id, bw)
-                   for (peer_id, bw) in zip(chosen, bws)]
-            
+        # -----------------------------------------
+        # 9. Create Upload objects
+        # -----------------------------------------
+
+        uploads = []
+
+        for peer_id in allocations:
+            bw = allocations[peer_id]
+            if bw > 0:
+                uploads.append(
+                    Upload(
+                        self.id,
+                        peer_id,
+                        bw
+                    )
+                )
+
         return uploads

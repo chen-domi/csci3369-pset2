@@ -18,14 +18,14 @@ class DcddStd(Peer):
         self.optimistic_peer = None
     
     def requests(self, peers, history):
+        # Find all pieces I still need
         needed_pieces = []
 
-        # Find all pieces I still need
         for i in range(len(self.pieces)):
             if self.pieces[i] < self.conf.blocks_per_piece:
                 needed_pieces.append(i)
 
-        # Count how many peers have each needed piece
+        # Count rarity of each needed piece
         rarity = {}
 
         for piece_id in needed_pieces:
@@ -39,11 +39,11 @@ class DcddStd(Peer):
 
         requests = []
 
-        # Go through each peer and decide what to ask them for
+        # Consider each peer independently
         for peer in peers:
             candidates = []
 
-            # Find pieces I need that this peer has
+            # Pieces I need that this peer has
             for piece_id in needed_pieces:
                 if piece_id in peer.available_pieces:
                     candidates.append(piece_id)
@@ -51,21 +51,24 @@ class DcddStd(Peer):
             # Randomize ties
             random.shuffle(candidates)
 
-            # Put rarest pieces first
-            candidates.sort(key=lambda piece_id: rarity[piece_id])
+            # Then sort rarest-first
+            candidates.sort(
+                key=lambda piece_id: rarity[piece_id]
+            )
 
-            # Request at most max_requests pieces
-            num_requests = min(self.max_requests, len(candidates))
+            num_requests = min(
+                self.max_requests,
+                len(candidates)
+            )
 
             for i in range(num_requests):
                 piece_id = candidates[i]
-                start_block = self.pieces[piece_id]
 
                 request = Request(
                     self.id,
                     peer.id,
                     piece_id,
-                    start_block
+                    self.pieces[piece_id]
                 )
 
                 requests.append(request)

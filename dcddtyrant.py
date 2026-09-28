@@ -28,15 +28,16 @@ class DcddTyrant(Peer):
         # Number of consecutive successful reciprocation rounds
         self.recip_rounds = {}
 
+
     def requests(self, peers, history):
-        # Find pieces that we still need
+        # Find all pieces I still need
         needed_pieces = []
 
         for i in range(len(self.pieces)):
             if self.pieces[i] < self.conf.blocks_per_piece:
                 needed_pieces.append(i)
 
-        # Count how many peers have each piece
+        # Count rarity of each needed piece
         rarity = {}
 
         for piece_id in needed_pieces:
@@ -50,7 +51,7 @@ class DcddTyrant(Peer):
 
         requests = []
 
-        # Request pieces from each peer
+        # Consider each peer independently
         for peer in peers:
             candidates = []
 
@@ -59,10 +60,10 @@ class DcddTyrant(Peer):
                 if piece_id in peer.available_pieces:
                     candidates.append(piece_id)
 
-            # Randomize equal-rarity pieces
+            # Randomize ties
             random.shuffle(candidates)
 
-            # Prefer rare pieces
+            # Then sort rarest-first
             candidates.sort(
                 key=lambda piece_id: rarity[piece_id]
             )
@@ -75,14 +76,11 @@ class DcddTyrant(Peer):
             for i in range(num_requests):
                 piece_id = candidates[i]
 
-                # Start from the next block we need
-                start_block = self.pieces[piece_id]
-
                 request = Request(
                     self.id,
                     peer.id,
                     piece_id,
-                    start_block
+                    self.pieces[piece_id]
                 )
 
                 requests.append(request)
