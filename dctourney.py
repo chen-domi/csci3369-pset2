@@ -13,7 +13,7 @@ from messages import Upload, Request
 from util import even_split
 from peer import Peer
 
-class DcddTourney(Peer):
+class DcTourney(Peer):
 
     def post_init(self):
         self.upload_estimates = {}
@@ -130,6 +130,7 @@ class DcddTourney(Peer):
 
         # 4. Rank requesters by value.
         random.shuffle(requester_ids)
+
         requester_ids.sort(
             key=lambda peer_id:
                 self.download_estimates[peer_id] / self.upload_estimates[peer_id],

@@ -15,7 +15,7 @@ from peer import Peer
 
 #!/usr/bin/python
 
-class DcddStd(Peer):
+class DcStd(Peer):
 
     def post_init(self):
         self.optimistic_peer = None

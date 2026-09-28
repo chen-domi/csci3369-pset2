@@ -13,7 +13,7 @@ from messages import Upload, Request
 from util import even_split
 from peer import Peer
 
-class DcddTyrant(Peer):
+class DcTyrant(Peer):
 
     def post_init(self):
         self.upload_estimates = {}
