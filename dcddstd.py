@@ -13,19 +13,27 @@ from messages import Upload, Request
 from util import even_split
 from peer import Peer
 
+#!/usr/bin/python
+
 class DcddStd(Peer):
+
     def post_init(self):
         self.optimistic_peer = None
-    
+
+    # 1. Find the pieces we still need.
+    # 2. Count how rare each needed piece is.
+    # 3. For each peer, find which needed pieces they have.
+    # 4. Randomize ties and put rarest pieces first.
+    # 5. Request up to max_requests pieces from each peer.
     def requests(self, peers, history):
-        # Find all pieces I still need
+        # 1. Find the pieces we still need.
         needed_pieces = []
 
         for i in range(len(self.pieces)):
             if self.pieces[i] < self.conf.blocks_per_piece:
                 needed_pieces.append(i)
 
-        # Count rarity of each needed piece
+        # 2. Count how rare each needed piece is.
         rarity = {}
 
         for piece_id in needed_pieces:
@@ -39,67 +47,54 @@ class DcddStd(Peer):
 
         requests = []
 
-        # Consider each peer independently
+        # 3. For each peer, find which needed pieces they have.
         for peer in peers:
             candidates = []
 
-            # Pieces I need that this peer has
             for piece_id in needed_pieces:
                 if piece_id in peer.available_pieces:
                     candidates.append(piece_id)
 
-            # Randomize ties
+            # 4. Randomize ties and put rarest pieces first.
             random.shuffle(candidates)
+            candidates.sort(key=lambda piece_id: rarity[piece_id])
 
-            # Then sort rarest-first
-            candidates.sort(
-                key=lambda piece_id: rarity[piece_id]
-            )
-
-            num_requests = min(
-                self.max_requests,
-                len(candidates)
-            )
+            # 5. Request up to max_requests pieces from each peer.
+            num_requests = min(self.max_requests, len(candidates))
 
             for i in range(num_requests):
                 piece_id = candidates[i]
-
-                request = Request(
-                    self.id,
-                    peer.id,
-                    piece_id,
-                    self.pieces[piece_id]
+                requests.append(
+                    Request(self.id, peer.id, piece_id, self.pieces[piece_id])
                 )
-
-                requests.append(request)
 
         return requests
 
+    # 1. Find the unique peers currently requesting from us.
+    # 2. Measure how much each requester gave us in the last two rounds.
+    # 3. Choose up to 3 regular peers with the highest contributions.
+    # 4. Choose an optimistic peer from the remaining requesters.
+    # 5. Combine the regular and optimistic peers.
+    # 6. Split upload bandwidth evenly and return the Upload objects.
     def uploads(self, requests, peers, history):
         round_num = history.current_round()
 
-        # If nobody is requesting from me, upload to nobody
         if len(requests) == 0:
             return []
 
-        # Get unique IDs of peers currently requesting from me
+        # 1. Find the unique peers currently requesting from us.
         requester_ids = []
+
         for request in requests:
             if request.requester_id not in requester_ids:
                 requester_ids.append(request.requester_id)
 
-        # -----------------------------------
-        # 1. REGULAR UNBLOCKING
-        # -----------------------------------
-
-        # Count how many blocks each requester gave me
-        # during the previous two rounds
+        # 2. Measure how much each requester gave us in the last two rounds.
         recent_downloads = {}
 
         for peer_id in requester_ids:
             recent_downloads[peer_id] = 0
 
-        # Look at at most the last two completed rounds
         recent_rounds = history.downloads[-2:]
 
         for round_downloads in recent_rounds:
@@ -107,16 +102,14 @@ class DcddStd(Peer):
                 if download.from_id in recent_downloads:
                     recent_downloads[download.from_id] += download.blocks
 
-        # Randomize first so ties are broken randomly
+        # 3. Choose up to 3 regular peers with the highest contributions.
         random.shuffle(requester_ids)
 
-        # Sort by how much each peer recently uploaded to me
         requester_ids.sort(
             key=lambda peer_id: recent_downloads[peer_id],
             reverse=True
         )
 
-        # Choose up to 3 peers with positive recent contribution
         regular_peers = []
 
         for peer_id in requester_ids:
@@ -126,21 +119,13 @@ class DcddStd(Peer):
             if len(regular_peers) == 3:
                 break
 
-        # -----------------------------------
-        # 2. OPTIMISTIC UNBLOCKING
-        # -----------------------------------
-
-        # Peers eligible for optimistic unblocking are requesting
-        # peers who are not already regularly unblocked
+        # 4. Choose an optimistic peer from the remaining requesters.
         optimistic_candidates = []
 
         for peer_id in requester_ids:
             if peer_id not in regular_peers:
                 optimistic_candidates.append(peer_id)
 
-        # Pick a new optimistic peer every 3 rounds.
-        # Also pick a new one if the old peer stopped requesting
-        # or became a regular peer.
         choose_new_optimistic = (
             round_num % 3 == 0
             or self.optimistic_peer not in requester_ids
@@ -153,10 +138,7 @@ class DcddStd(Peer):
             else:
                 self.optimistic_peer = None
 
-        # -----------------------------------
-        # 3. ALLOCATE BANDWIDTH
-        # -----------------------------------
-
+        # 5. Combine the regular and optimistic peers.
         chosen = list(regular_peers)
 
         if (
@@ -169,14 +151,11 @@ class DcddStd(Peer):
         if len(chosen) == 0:
             return []
 
-        # Divide my upload bandwidth evenly among chosen peers
+        # 6. Split upload bandwidth evenly and return the Upload objects.
         bws = even_split(self.up_bw, len(chosen))
-
         uploads = []
 
         for peer_id, bw in zip(chosen, bws):
-            uploads.append(
-                Upload(self.id, peer_id, bw)
-            )
+            uploads.append(Upload(self.id, peer_id, bw))
 
         return uploads
